@@ -1,0 +1,16 @@
+{
+  "format": "sam3d_camera",
+  "version": 2,
+  "fps": 24.0,
+  "image_width": 2250,
+  "image_height": 1500,
+  "camera_model": "pinhole",
+  "focal_length_px": 2704.163456597992,
+  "sensor_width_mm": 36.0,
+  "lens_mm": 43.266615305567875,
+  "principal_point": [
+    1125.0,
+    750.0
+  ],
+  "note": "Static camera at origin looking -Z, Y-up. OBJs have cam translation baked into vertices."
+}
