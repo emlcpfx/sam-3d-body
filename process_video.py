@@ -565,67 +565,14 @@ def main():
     if args.max_frames > 0:
         total_frames = min(total_frames, args.max_frames)
 
-    # ===== PASS 1: Inference on all frames =====
-    print(f"\n=== Pass 1: Inference ({total_frames} frames) ===")
-    all_frames = []
-    all_outputs = []
-    temp_path = os.path.join(os.path.dirname(args.output) or ".", "_temp_frame.jpg")
-
-    for frame_idx in tqdm(range(total_frames), desc="Inference"):
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        all_frames.append(frame)
-
-        # Estimator expects a file path
-        cv2.imwrite(temp_path, frame)
-        with torch.no_grad():
-            outputs = estimator.process_one_image(temp_path, bbox_thr=args.bbox_thresh)
-        all_outputs.append(outputs)
-
-    cap.release()
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
-
-    n_valid = sum(1 for o in all_outputs if len(o) > 0)
-    print(f"  Detected person in {n_valid}/{len(all_outputs)} frames")
-
     # Focal length is constant: sqrt(w² + h²) for fixed-resolution video
     focal_length = float(np.sqrt(width**2 + height**2))
 
-    # ===== SIDECAR EXPORT (raw, pre-smoothing) =====
-    if args.export_sidecar:
-        base = os.path.splitext(os.path.basename(args.input))[0]
-        out_dir = args.output_dir if args.output_dir else (os.path.dirname(args.input) or ".")
-        os.makedirs(out_dir, exist_ok=True)
-        sidecar_path = os.path.join(out_dir, f"{base}_sam3d_sidecar.json")
-        print(f"\n=== Sidecar Export (raw predictions) ===")
-        export_sidecar(sidecar_path, all_outputs, fps, width, height, focal_length)
+    need_smoothing = not args.no_smooth  # will be confirmed after inference
 
-    # ===== SMOOTHING =====
-    if not args.no_smooth and n_valid >= 3:
-        print(f"\n=== Temporal Smoothing (savgol window={args.smooth_window}, poly={args.smooth_poly}) ===")
-        all_outputs = apply_temporal_smoothing(
-            all_outputs,
-            window_length=args.smooth_window,
-            poly_order=args.smooth_poly,
-        )
-    elif args.no_smooth:
-        print("\n=== Smoothing disabled ===")
-    else:
-        print(f"\n=== Smoothing skipped (only {n_valid} valid frames) ===")
-
-    # ===== PASS 2: Render + Export =====
-    print(f"\n=== Pass 2: Render + Export ===")
-    ffmpeg_proc = None
-    abc_world_verts = []  # collect for Alembic export
-    abc_template_written = False
-
-    for frame_idx in tqdm(range(len(all_frames)), desc="Rendering"):
-        frame = all_frames[frame_idx]
-        outputs = all_outputs[frame_idx]
-
+    # --- Helper: render + export for one frame ---
+    def _render_export_frame(frame_idx, frame, outputs, ffmpeg_proc, abc_world_verts, abc_template_written):
+        """Process a single frame for rendering and export. Returns updated (ffmpeg_proc, abc_template_written)."""
         # Export .obj / collect for .abc
         if (args.export_obj or args.export_abc) and len(outputs) > 0:
             for pid, person in enumerate(outputs):
@@ -708,6 +655,113 @@ def main():
 
             ffmpeg_proc.stdin.write(vis_frame.tobytes())
 
+        return ffmpeg_proc, abc_template_written
+
+    ffmpeg_proc = None
+    abc_world_verts = []  # collect for Alembic export
+    abc_template_written = False
+
+    if need_smoothing:
+        # ===== TWO-PASS: inference first, then smooth, then render/export =====
+        # Only outputs are buffered; frames are re-read from video in Pass 2
+        print(f"\n=== Pass 1: Inference ({total_frames} frames) ===")
+        all_outputs = []
+
+        for frame_idx in tqdm(range(total_frames), desc="Inference"):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            with torch.no_grad():
+                outputs = estimator.process_one_image(frame_rgb, bbox_thr=args.bbox_thresh)
+            all_outputs.append(outputs)
+
+        cap.release()
+
+        n_valid = sum(1 for o in all_outputs if len(o) > 0)
+        actual_frames = len(all_outputs)
+        print(f"  Detected person in {n_valid}/{actual_frames} frames")
+
+        # Sidecar export (raw, pre-smoothing)
+        if args.export_sidecar:
+            base = os.path.splitext(os.path.basename(args.input))[0]
+            out_dir = args.output_dir if args.output_dir else (os.path.dirname(args.input) or ".")
+            os.makedirs(out_dir, exist_ok=True)
+            sidecar_path = os.path.join(out_dir, f"{base}_sam3d_sidecar.json")
+            print(f"\n=== Sidecar Export (raw predictions) ===")
+            export_sidecar(sidecar_path, all_outputs, fps, width, height, focal_length)
+
+        # Smoothing
+        if n_valid >= 3:
+            print(f"\n=== Temporal Smoothing (savgol window={args.smooth_window}, poly={args.smooth_poly}) ===")
+            all_outputs = apply_temporal_smoothing(
+                all_outputs,
+                window_length=args.smooth_window,
+                poly_order=args.smooth_poly,
+            )
+        else:
+            print(f"\n=== Smoothing skipped (only {n_valid} valid frames) ===")
+
+        # Render + Export pass
+        print(f"\n=== Pass 2: Render + Export ===")
+        need_frames = not args.no_vis  # only re-read video if rendering visualization
+        if need_frames:
+            cap2 = cv2.VideoCapture(args.input)
+
+        for frame_idx in tqdm(range(actual_frames), desc="Rendering"):
+            frame = None
+            if need_frames:
+                ret, frame = cap2.read()
+                if not ret:
+                    frame = np.zeros((height, width, 3), dtype=np.uint8)
+
+            ffmpeg_proc, abc_template_written = _render_export_frame(
+                frame_idx, frame, all_outputs[frame_idx],
+                ffmpeg_proc, abc_world_verts, abc_template_written,
+            )
+
+        if need_frames:
+            cap2.release()
+
+    else:
+        # ===== SINGLE-PASS: inference + render/export together (no smoothing) =====
+        print(f"\n=== Inference + Export ({total_frames} frames, no smoothing) ===")
+        all_outputs = []  # lightweight: kept for sidecar export
+        n_valid = 0
+
+        for frame_idx in tqdm(range(total_frames), desc="Processing"):
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            with torch.no_grad():
+                outputs = estimator.process_one_image(frame_rgb, bbox_thr=args.bbox_thresh)
+
+            if len(outputs) > 0:
+                n_valid += 1
+
+            if args.export_sidecar:
+                all_outputs.append(outputs)
+
+            ffmpeg_proc, abc_template_written = _render_export_frame(
+                frame_idx, frame, outputs,
+                ffmpeg_proc, abc_world_verts, abc_template_written,
+            )
+
+        cap.release()
+        print(f"  Detected person in {n_valid}/{total_frames} frames")
+
+        # Sidecar export
+        if args.export_sidecar:
+            base = os.path.splitext(os.path.basename(args.input))[0]
+            out_dir = args.output_dir if args.output_dir else (os.path.dirname(args.input) or ".")
+            os.makedirs(out_dir, exist_ok=True)
+            sidecar_path = os.path.join(out_dir, f"{base}_sam3d_sidecar.json")
+            print(f"\n=== Sidecar Export (raw predictions) ===")
+            export_sidecar(sidecar_path, all_outputs, fps, width, height, focal_length)
+
+
     if ffmpeg_proc:
         ffmpeg_proc.stdin.close()
         ffmpeg_proc.wait()
@@ -744,7 +798,7 @@ def main():
             ))
         print(f"  Blender script: {blender_script_path}")
 
-    print(f"\nDone! Processed {len(all_frames)} frames.")
+    print(f"\nDone! Processed {total_frames} frames.")
     print(f"Output video: {args.output}")
     if args.export_obj:
         print(f"OBJ files: {args.obj_dir}/")

@@ -94,13 +94,11 @@ class SAM3DBodyEstimator:
         self.image_embeddings = None
         self.output = None
         self.prev_prompt = []
-        torch.cuda.empty_cache()
 
         if type(img) == str:
             img = load_image(img, backend="cv2", image_format="bgr")
             image_format = "bgr"
         else:
-            print("####### Please make sure the input image is in RGB format")
             image_format = "rgb"
         height, width = img.shape[:2]
 
