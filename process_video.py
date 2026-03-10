@@ -21,6 +21,11 @@ import numpy as np
 import torch
 from scipy.signal import savgol_filter
 from tqdm import tqdm
+from functools import partial
+
+# When piped (not a TTY), use mininterval=2 so tqdm flushes progress lines
+if not sys.stderr.isatty():
+    tqdm = partial(tqdm, mininterval=2, file=sys.stdout)
 
 # obj2abc binary from headcase — check common locations
 _OBJ2ABC_CANDIDATES = [

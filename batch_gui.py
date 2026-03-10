@@ -19,6 +19,24 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROCESS_SCRIPT = os.path.join(SCRIPT_DIR, "process_video.py")
 CONDA_ENV = "tunet"
 
+# Find conda env python directly to avoid conda run buffering
+def _find_conda_python():
+    """Get path to python.exe inside the conda env (bypasses conda run buffering)."""
+    try:
+        result = subprocess.run(
+            ["conda", "info", "--envs"], capture_output=True, text=True, timeout=10)
+        for line in result.stdout.splitlines():
+            if CONDA_ENV in line:
+                env_path = line.split()[-1]
+                py = os.path.join(env_path, "python.exe")
+                if os.path.isfile(py):
+                    return py
+    except Exception:
+        pass
+    return None
+
+CONDA_PYTHON = _find_conda_python()
+
 VIDEO_EXTENSIONS = (
     ".mov", ".mp4", ".avi", ".mkv", ".mxf", ".webm",
     ".MOV", ".MP4", ".AVI", ".MKV", ".MXF", ".WEBM",
@@ -276,11 +294,13 @@ class BatchApp:
                             f"Processing {idx + 1}/{total}: {basename}")
             self._log_safe(f"\n=== [{idx + 1}/{total}] {basename} ===")
 
-            cmd = [
-                "conda", "run", "-n", CONDA_ENV,
-                "python", PROCESS_SCRIPT,
-                "--input", filepath,
-            ]
+            if CONDA_PYTHON:
+                cmd = [CONDA_PYTHON, "-u", PROCESS_SCRIPT,
+                       "--input", filepath]
+            else:
+                cmd = ["conda", "run", "-n", CONDA_ENV,
+                       "python", PROCESS_SCRIPT,
+                       "--input", filepath]
 
             if output_dir:
                 cmd += ["--output_dir", output_dir]
@@ -306,6 +326,10 @@ class BatchApp:
                 if sys.platform == "win32":
                     creationflags = subprocess.CREATE_NO_WINDOW
 
+                # Force unbuffered Python output so we get real-time progress
+                env = os.environ.copy()
+                env["PYTHONUNBUFFERED"] = "1"
+
                 self._process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -314,19 +338,34 @@ class BatchApp:
                     encoding="utf-8",
                     errors="replace",
                     creationflags=creationflags,
+                    env=env,
                 )
 
                 for line in iter(self._process.stdout.readline, ""):
                     if self._cancel_requested:
                         break
                     stripped = line.rstrip()
-                    if stripped:
-                        # Show inference progress inline
-                        if stripped.startswith("Inference:") or stripped.startswith("Rendering:"):
-                            self.root.after(0, self.status_var.set,
-                                            f"[{idx + 1}/{total}] {basename} — {stripped[:60]}")
-                        else:
-                            self._log_safe(stripped)
+                    if not stripped:
+                        continue
+                    # tqdm writes \r-delimited progress — grab last segment
+                    if "\r" in stripped:
+                        stripped = stripped.split("\r")[-1].strip()
+                        if not stripped:
+                            continue
+                    # Show inference/rendering progress in status bar
+                    if stripped.startswith("Inference:") or stripped.startswith("Rendering:"):
+                        self.root.after(0, self.status_var.set,
+                                        f"[{idx + 1}/{total}] {basename} — {stripped[:80]}")
+                        # Also parse percentage for progress bar within this file
+                        try:
+                            pct_str = stripped.split("%")[0].split(":")[-1].strip()
+                            file_pct = float(pct_str)
+                            overall_pct = (idx + file_pct / 100) / total * 100
+                            self.root.after(0, self.progress_var.set, overall_pct)
+                        except (ValueError, IndexError):
+                            pass
+                    else:
+                        self._log_safe(stripped)
 
                 self._process.stdout.close()
                 rc = self._process.wait(timeout=1800)
