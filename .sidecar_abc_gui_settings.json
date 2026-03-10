@@ -1,0 +1,7 @@
+{
+  "output_dir": "",
+  "mhr_path": "D:\\Work\\Coding\\AE_SAM3DBODY\\models\\exported\\mhr_model.pt",
+  "meta_path": "D:\\Work\\Coding\\AE_SAM3DBODY\\models\\exported\\sam3db_metadata.pt",
+  "window": 7,
+  "poly": 3
+}
