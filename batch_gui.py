@@ -113,6 +113,11 @@ class BatchApp:
 
         ttk.Separator(row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
+        self.body_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="Body Only (fast)", variable=self.body_only_var).pack(side=tk.LEFT, padx=4)
+
+        ttk.Separator(row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
         ttk.Label(row, text="Max frames:").pack(side=tk.LEFT, padx=(4, 2))
         self.max_frames_var = tk.IntVar(value=0)
         spin = ttk.Spinbox(row, from_=0, to=99999, width=6,
@@ -313,7 +318,8 @@ class BatchApp:
                 cmd.append("--no_vis")
             if self.no_smooth_var.get():
                 cmd.append("--no_smooth")
-
+            if self.body_only_var.get():
+                cmd.append("--body_only")
             max_f = self.max_frames_var.get()
             if max_f > 0:
                 cmd += ["--max_frames", str(max_f)]

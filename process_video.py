@@ -510,6 +510,8 @@ def main():
     # Output scaling
     parser.add_argument("--scale", type=float, default=0, help="Output scale factor (e.g. 0.5). 0=auto-fit to 4K limit")
     parser.add_argument("--output_dir", default="", help="Output directory for sidecar/abc exports (default: next to input)")
+    # Performance args
+    parser.add_argument("--body_only", action="store_true", help="Body-only inference (skip hand refinement, ~3x faster)")
     args = parser.parse_args()
 
     # Ensure window is odd
@@ -535,6 +537,15 @@ def main():
     )
     estimator = SAM3DBodyEstimator(sam_3d_body_model=model, model_cfg=model_cfg)
     faces = estimator.faces  # (36874, 3)
+
+    # Inference type: body-only skips hand refinement passes (~3x faster)
+    inference_type = "body" if args.body_only else "full"
+    if args.body_only:
+        print("Body-only mode: skipping hand refinement (faster)")
+
+    # Note: AMP autocast is NOT used — the TorchScript MHR model contains sparse
+    # ops (addmm_sparse_cuda) that don't support bfloat16. The backbone already
+    # converts to bf16 internally via model config.
 
     # Get UV data for .obj/.abc export
     texcoords = None
@@ -673,8 +684,12 @@ def main():
                 break
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             with torch.no_grad():
-                outputs = estimator.process_one_image(frame_rgb, bbox_thr=args.bbox_thresh)
+                outputs = estimator.process_one_image(
+                    frame_rgb, bbox_thr=args.bbox_thresh,
+                    inference_type=inference_type)
             all_outputs.append(outputs)
+            if frame_idx % 100 == 99:
+                torch.cuda.empty_cache()
 
         cap.release()
 
@@ -736,13 +751,18 @@ def main():
 
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             with torch.no_grad():
-                outputs = estimator.process_one_image(frame_rgb, bbox_thr=args.bbox_thresh)
+                outputs = estimator.process_one_image(
+                    frame_rgb, bbox_thr=args.bbox_thresh,
+                    inference_type=inference_type)
 
             if len(outputs) > 0:
                 n_valid += 1
 
             if args.export_sidecar:
                 all_outputs.append(outputs)
+
+            if frame_idx % 100 == 99:
+                torch.cuda.empty_cache()
 
             ffmpeg_proc, abc_template_written = _render_export_frame(
                 frame_idx, frame, outputs,
